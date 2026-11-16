@@ -172,7 +172,7 @@ export function peerStats(snapshot: Snapshot, model: ModelConstants = MODEL): { 
   return { byCategory, global, ratiosByCategory, allRatios: [...all].sort((a, b) => a - b), cap };
 }
 
-/** A category quartile shrunk toward the global one by the category's peer count. */
+/** A category figure shrunk toward the global one by the category's peer count. */
 function shrunk(catValue: number, globalValue: number, peers: number, k: number): number {
   return (peers * catValue + k * globalValue) / (peers + k);
 }
