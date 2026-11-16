@@ -503,7 +503,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
     ],
     [
       p.chains.length > 1
-        ? `Bring $${capital} of USDC to ${chain}, the chain where ${p.name} holds most of its TVL: withdraw from an exchange straight to ${chain} where it is offered, or bridge from Ethereum.`
+        ? `Bring $${capital} of USDC to ${chain}, the first of ${p.name}'s ${p.chains.length} chains on record: withdraw from an exchange straight to ${chain} where it is offered, or bridge from Ethereum.`
         : `Bring $${capital} of USDC to ${chain}: withdraw from an exchange straight to the chain where it is offered, or bridge from Ethereum.`,
       `${GAS_ACTION[tier]} for the move`,
       '15 minutes',
