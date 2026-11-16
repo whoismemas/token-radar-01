@@ -88,7 +88,13 @@ for (const name of shots) {
 }
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
+// The gate also caps the dossier itself at 1.5 MiB, a cap buildDossier's own 4 MiB does not
+// enforce, so the program refuses an oversized one rather than hand in an invalid entry.
 const dossier = buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: DASHBOARD_CAPS });
+if (dossier.length > DOSSIER_MAX_BYTES) {
+  process.stderr.write(`radar: dossier.json would be ${dossier.length} bytes, over the gate's ${DOSSIER_MAX_BYTES}: shrink the screenshots\n`);
+  process.exit(1);
+}
 writeFileSync(join(out, 'dossier.json'), dossier);
 
 process.stdout.write(

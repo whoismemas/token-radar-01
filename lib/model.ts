@@ -9,12 +9,16 @@
 // Implied value is a peer model, computed from the snapshot's own figures and nothing else:
 //
 //   peers      every protocol whose token trades with a market cap on record (outside the CEX
-//              category, whose balances are not a product's value) gives a ratio mcap / TVL
+//              category, whose balances are not a product's value) gives a ratio mcap / TVL,
+//              capped at the market's own 95th percentile before any median is taken: a ratio
+//              of 400x is a tiny TVL denominator talking, not a price a category can launch at
 //   multiple   the protocol's category median ratio, shrunk toward the global median by the
 //              category's peer count: M = (n x med_cat + K x med_all) / (n + K), K = 6, so a
 //              category with one loud peer cannot shout down the whole market's evidence
-//   band       the same shrinkage on the quartiles gives a low and a high multiple, and the
-//              row's band is its TVL at those multiples: the spread is the model's honesty
+//   band       the estimate multiplied and divided by the square root of the peer spread (the
+//              category's interquartile ratio, blended with the market's in log space by the
+//              same peer-count shrinkage): the band widens exactly as the evidence thins, and
+//              the spread is printed beside every row as its confidence
 //   momentum   1 + clamp(change_7d, -50, 100) / 100 x 0.6, never below 0.55: a protocol whose
 //              TVL is compounding would not launch into the same market as one that is leaking
 //   age        0.75 + 0.45 x min(age_days, 1460) / 1460: four tokenless years of operation is
@@ -50,6 +54,7 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard so a reader can check every row by hand. */
 export interface ModelConstants {
+  winsor_quantile: number;
   shrink_k: number;
   momentum_weight: number;
   momentum_floor_pct: number;
@@ -63,6 +68,7 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
+  winsor_quantile: 0.95,
   shrink_k: 6,
   momentum_weight: 0.6,
   momentum_floor_pct: -50,
@@ -137,17 +143,23 @@ export interface PeerStats {
 }
 
 /** Peer statistics: one row per category that has tokenized peers, and the global row apart. */
-export function peerStats(snapshot: Snapshot): { byCategory: Map<string, PeerStats>; global: PeerStats; ratiosByCategory: Map<string, number[]>; allRatios: number[] } {
-  const lists = new Map<string, number[]>();
-  const all: number[] = [];
+export function peerStats(snapshot: Snapshot, model: ModelConstants = MODEL): { byCategory: Map<string, PeerStats>; global: PeerStats; ratiosByCategory: Map<string, number[]>; allRatios: number[]; cap: number } {
+  const raw: Array<{ category: string | null; ratio: number }> = [];
   for (const p of snapshot.protocols) {
     if (!isPeer(p)) continue;
-    const ratio = p.mcap_usd! / p.tvl_usd;
+    raw.push({ category: p.category, ratio: p.mcap_usd! / p.tvl_usd });
+  }
+  // Winsorize: no peer's ratio counts for more than the market's own 95th percentile.
+  const cap = quantileOf(raw.map((r) => r.ratio), model.winsor_quantile);
+  const lists = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const r of raw) {
+    const ratio = Math.min(r.ratio, cap);
     all.push(ratio);
-    if (p.category !== null) {
-      const list = lists.get(p.category) ?? [];
+    if (r.category !== null) {
+      const list = lists.get(r.category) ?? [];
       list.push(ratio);
-      lists.set(p.category, list);
+      lists.set(r.category, list);
     }
   }
   const byCategory = new Map<string, PeerStats>();
@@ -157,7 +169,7 @@ export function peerStats(snapshot: Snapshot): { byCategory: Map<string, PeerSta
   const global: PeerStats = { peers: all.length, q25: quantileOf(all, 0.25), median: medianOf(all), q75: quantileOf(all, 0.75) };
   const ratiosByCategory = new Map<string, number[]>();
   for (const [key, ratios] of lists) ratiosByCategory.set(key, [...ratios].sort((a, b) => a - b));
-  return { byCategory, global, ratiosByCategory, allRatios: [...all].sort((a, b) => a - b) };
+  return { byCategory, global, ratiosByCategory, allRatios: [...all].sort((a, b) => a - b), cap };
 }
 
 /** A category quartile shrunk toward the global one by the category's peer count. */
@@ -185,14 +197,18 @@ function adjustments(p: SnapshotProtocol, age: number | null, unknownAgeDays: nu
   return { momentum, age: ageMult, chains: chainMult };
 }
 
-/** How much the board trusts a row's peer basis: many peers and a narrow band earn trust. */
+/** How much the board trusts a row's peer basis: many peers and a narrow spread earn trust. */
 export type Confidence = 'high' | 'medium' | 'low';
 
-function confidenceFor(peers: number, lowMult: number, highMult: number): Confidence {
-  const spread = lowMult > 0 ? highMult / lowMult : Infinity;
-  if (peers >= 8 && spread <= 6) return 'high';
-  if (peers >= 3 && spread <= 12) return 'medium';
+function confidenceFor(peers: number, spread: number): Confidence {
+  if (peers >= 8 && spread <= 16) return 'high';
+  if (peers >= 3 && spread <= 35) return 'medium';
   return 'low';
+}
+
+/** A peer set's interquartile spread, q75 over q25, floored so a zero quartile cannot explode it. */
+function spreadOf(stats: PeerStats): number {
+  return stats.q75 / Math.max(stats.q25, 1e-4);
 }
 
 /** One scored protocol: the board row board.json carries, and the dashboard's whole dataset. */
@@ -248,6 +264,8 @@ export interface RadarData {
   model: ModelConstants;
   model_version: string;
   unknown_age_days: number;
+  /** The winsorizing cap applied to every peer ratio before any median was taken. */
+  peer_cap: number;
   global_peers: PeerStats;
   stats: {
     protocols: number;
@@ -277,7 +295,7 @@ function unknownAgeDays(snapshot: Snapshot): number {
 
 /** Score every rankable protocol and rank them, strongest implied value first. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): ScoredRow[] {
-  const { byCategory, global } = peerStats(snapshot);
+  const { byCategory, global } = peerStats(snapshot, model);
   const unknownAge = unknownAgeDays(snapshot);
   const watch = new Set(snapshot.watchlist);
   const scored = snapshot.protocols
@@ -286,15 +304,18 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): S
       // No category on record, or a category with no tokenized peer: the global basis, unshrunk.
       const cat = (p.category !== null ? byCategory.get(p.category) : undefined) ?? { peers: 0, q25: global.q25, median: global.median, q75: global.q75 };
       const multiple = shrunk(cat.median, global.median, cat.peers, model.shrink_k);
-      const lowMult = shrunk(cat.q25, global.q25, cat.peers, model.shrink_k);
-      const highMult = shrunk(cat.q75, global.q75, cat.peers, model.shrink_k);
+      // The band: the category's interquartile spread blended with the market's in log space,
+      // so a thin category's band widens instead of collapsing onto its single peer.
+      const logSpread = (cat.peers * Math.log(spreadOf(cat)) + model.shrink_k * Math.log(spreadOf(global))) / (cat.peers + model.shrink_k);
+      const spread = Math.exp(logSpread);
+      const half = Math.sqrt(spread);
       const age = ageDays(snapshot.as_of, p.listed_at);
       const adj = adjustments(p, age, unknownAge, model);
       const factor = adj.momentum * adj.age * adj.chains;
       const implied = Math.max(1, Math.round(p.tvl_usd * multiple * factor));
-      const low = Math.min(implied, Math.max(1, Math.round(p.tvl_usd * lowMult * factor)));
-      const high = Math.max(implied, Math.max(1, Math.round(p.tvl_usd * highMult * factor)));
-      return { p, age, cat, multiple, low, implied, high, adj };
+      const low = Math.min(implied, Math.max(1, Math.round(p.tvl_usd * (multiple / half) * factor)));
+      const high = Math.max(implied, Math.max(1, Math.round(p.tvl_usd * (multiple * half) * factor)));
+      return { p, age, cat, multiple, spread, low, implied, high, adj };
     });
   scored.sort((a, b) => b.implied - a.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -315,7 +336,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): S
     band_low_usd: s.low,
     implied_value_usd: s.implied,
     band_high_usd: s.high,
-    confidence: confidenceFor(s.cat.peers, s.low / Math.max(1, s.p.tvl_usd), s.high / Math.max(1, s.p.tvl_usd)),
+    confidence: confidenceFor(s.cat.peers, s.spread),
     adj: { momentum: round4(s.adj.momentum), age: round4(s.adj.age), chains: round4(s.adj.chains) },
     farm_steps: farmSteps(s.p, s.age),
   }));
@@ -342,7 +363,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 /** Everything the dashboard renders: the board, the live set, the peer table and the model. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: ScoredRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
-  const { byCategory, global, ratiosByCategory, allRatios } = peerStats(snapshot);
+  const { byCategory, global, ratiosByCategory, allRatios, cap } = peerStats(snapshot, model);
   const liveAll = snapshot.protocols.filter((p) => !isPreToken(p));
   const categories: CategoryPeers[] = [...byCategory.entries()]
     .map(([key, v]) => ({ category: key, peers: v.peers, q25: round4(v.q25), median: round4(v.median), q75: round4(v.q75) }))
@@ -354,6 +375,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model,
     model_version: MODEL_VERSION,
     unknown_age_days: unknownAgeDays(snapshot),
+    peer_cap: round4(cap),
     global_peers: { peers: global.peers, q25: round4(global.q25), median: round4(global.median), q75: round4(global.q75) },
     stats: {
       protocols: snapshot.protocols.length,

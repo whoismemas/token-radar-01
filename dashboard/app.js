@@ -52,8 +52,11 @@
     var list = row.category ? DATA.peer_ratios[row.category] : undefined;
     var cat = list && list.length > 0 ? statsOf(list) : { peers: 0, q25: global.q25, median: global.median, q75: global.q75 };
     var multiple = shrunk(cat.median, global.median, cat.peers, m.shrink_k);
-    var lowMult = shrunk(cat.q25, global.q25, cat.peers, m.shrink_k);
-    var highMult = shrunk(cat.q75, global.q75, cat.peers, m.shrink_k);
+    var spreadOf = function (st) { return st.q75 / Math.max(st.q25, 1e-4); };
+    var logSpread = (cat.peers * Math.log(spreadOf(cat)) + m.shrink_k * Math.log(spreadOf(global))) / (cat.peers + m.shrink_k);
+    var half = Math.sqrt(Math.exp(logSpread));
+    var lowMult = multiple / half;
+    var highMult = multiple * half;
     var raw = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
     var pct = Math.min(m.momentum_cap_pct, Math.max(m.momentum_floor_pct, raw));
     var momentum = Math.max(m.momentum_min_mult, 1 + (pct / 100) * m.momentum_weight);
@@ -317,15 +320,15 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', null,
         'One function scores every row, from the snapshot\'s own figures; no protocol name is special-cased and no row is hand-picked. ',
-        'A protocol\'s category contributes the market caps of its tokenized peers, as multiples of their TVL; a category\'s median is shrunk toward the global median (',
+        'A protocol\'s category contributes the market caps of its tokenized peers, as multiples of their TVL, each capped at the market\'s 95th percentile (' + fmtMult(DATA.peer_cap) + ' here) so one micro-cap peer cannot price a category; a category\'s median is shrunk toward the global median (',
         el('b', { text: fmtMult(g.median) + ' across ' + g.peers + ' peers' }),
-        ') by how many peers it has, so one loud peer cannot set a category\'s price. The quartiles, shrunk the same way, give each row its low-high band.'
+        ') by how many peers it has, so one loud peer cannot set a category\'s price. Each row\'s band is its estimate multiplied and divided by the square root of the peer spread, blended the same way, so the band widens exactly as the evidence thins.'
       ),
       el('div', { class: 'formula', text: 'implied = round( TVL x M ) adjusted: momentum x' + ' (1 + clamp(7d, ' + m.momentum_floor_pct + ', ' + m.momentum_cap_pct + ') / 100 x ' + m.momentum_weight + ', min ' + m.momentum_min_mult + '), age x (' + m.age_base + ' + ' + m.age_range + ' x min(age_days, ' + m.age_cap_days + ') / ' + m.age_cap_days + '), chains x (1 + ' + m.chain_step + ' x min(chains - 1, ' + m.chain_cap + ')); M = (n x category median + ' + m.shrink_k + ' x global median) / (n + ' + m.shrink_k + ')' }),
       el('ul', null,
         el('li', null, el('b', { text: 'Separation. ' }), 'The board ranks only protocols that record no token and are not a wrapped, staked or bridged product of one that trades; trading protocols sit in the Already trading view at the market\'s own values.'),
         el('li', null, el('b', { text: 'Age. ' }), 'A protocol that has run for years with no token has the strongest launch record there is; the age term pays for it. A listing date the snapshot does not carry scores as the board\'s median age, ' + DATA.unknown_age_days + ' days.'),
-        el('li', null, el('b', { text: 'Confidence. ' }), 'A row is high when its category has at least 8 peers and a narrow band, low when the peer basis is thin or the band is wide: the spread is printed, never hidden.')
+        el('li', null, el('b', { text: 'Confidence. ' }), 'A row is high when its category has at least 8 peers and a spread within x16, medium at 3 or more peers within x35, low below that: the band is printed beside every row, never hidden.')
       ),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'peers' },
